@@ -1,0 +1,1073 @@
+---
+title: "Linear Regression Variations"
+author: "James To"
+date: "12/11/2020"
+output: 
+  pdf_document:
+    fig_caption: yes
+    number_sections: yes
+    toc: true
+    toc_depth: 2
+---
+
+
+\clearpage
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+# Packages
+library(tidyverse)
+library(caret)
+library(dummies)
+library(glmnet)
+library(dplyr)
+library(caret)
+library(boot)
+library(corrplot)
+library(ggplot2)
+library(tidyr)
+library(leaps)
+library(xtable)
+library(Hmisc)
+library(gridExtra)
+library(ModelMetrics)
+library(kableExtra)
+library(pROC)
+library(DMwR)
+library(plotmo)
+library(ipred)
+library(GGally)
+library(grid)
+library(ggplotify)
+library(broom)
+library(jtools)
+library(ROCR)
+library(stringr)
+
+# Start of code
+# Set wd
+setwd("C:/Users/James/Documents/2020T3/ACTL4305/Assignment 2")
+
+#----------- Intro ------------
+  
+## Import dataset
+A2_Data <- read_csv("A2-data.csv")
+
+Raw_Data <- A2_Data
+## Calculate "pure premiums" by taking the aggregate loss and dividing it by the exposure for each policyholder insured
+# Create a variable for claims frequency
+A2_Data$freq <- A2_Data$claim.count/A2_Data$exposure
+# Create a variable for claims severity
+A2_Data$sev <- ifelse(A2_Data$claim.count == 0, 0, A2_Data$claim.incurred/A2_Data$claim.count)
+# Create a variable for pure premiums
+A2_Data$prem <- A2_Data$freq*A2_Data$sev
+
+# From factor to integer
+Temp_Data <- Raw_Data
+Temp_Data[sapply(Temp_Data, is.character)] <- lapply(Temp_Data[sapply(Temp_Data, is.character)], 
+                                                     as.factor)
+Temp_Data[sapply(Temp_Data, is.factor)] <- lapply(Temp_Data[sapply(Temp_Data, is.factor)], 
+                                                     as.integer)
+
+#------------Data Partition------------------
+    
+## Subset the data to form a validation set and a training set
+# We will take 70% of the data to make up the training set and the remaining 30% to be the test data
+set.seed(2020)
+train_obs <- sample(nrow(A2_Data), floor(0.7*nrow(A2_Data)))
+train_set <- A2_Data[train_obs,]
+test_set <- A2_Data[-train_obs,]
+
+#-------------Binary Data Set--------------
+Binary_Data <- A2_Data
+Binary_Data[sapply(A2_Data, is.character)] <- lapply(A2_Data[sapply(A2_Data, is.character)], 
+                                                     as.factor)
+Binary_Data <- dummy.data.frame(Binary_Data)
+
+# Binary Train Set
+bin_train_set <- train_set
+bin_train_set[sapply(train_set, is.character)] <- lapply(train_set[sapply(train_set, is.character)], 
+                                                     as.factor)
+
+bin_train_set <- dummy.data.frame(bin_train_set)
+
+# Binary Test Set
+bin_test_set <- test_set
+bin_test_set[sapply(test_set, is.character)] <- lapply(test_set[sapply(test_set, is.character)], 
+                                                         as.factor)
+
+bin_test_set <- dummy.data.frame(bin_test_set)
+
+```
+
+\newpage
+
+# Executive Summary
+
+The aim of this report is to analyse the predictive power of linear regression models to predict pure premiums for auto insurance. The report delves into four different "variations" of linear models and finds the best fit. In addition, the report analyses the issues with auto insurance data, but performing Exploratory Data Analysis and gaining insights through visualisations. One of the core issues tackled in the report is "skewed" data. Two methods were used to try and predict the pure premium values of the policy holders. The four models variations of models are as follows:
+
+- Ordinary Least Squares (OLS) Regression
+
+Often the first regression technique for any forecasting project, OLS regression is well talked about for its easy interpretability and low computational power. However, the model lacks where "Black Box" models do not, and that is in accuracy of it's predictive power. Surprisingly, OLS regression resulted in our best model with the lowest Test MSE for both methods used for tackling predictions of pure premiums.
+
+- Ordinary Least Squares (OLS) Regression with Shrinkage Techniques
+
+Shrinkage Techniques were used in hopes of improving the OLS model, but failed to do so. Though yielding similar results as OLS, the LASSO, Ridge, and Elastic Net all fell short of beating the prior model when it came to predicting pure premiums. 
+
+- Best Subset Selection
+
+Best Subset Selection attempts to find the best combination of predictor variables by going through every possible combination. In total, the 35 predictors - binary and correlated removed - went through a multitude of combinations but still resulted in a model worse than both OLS and OLS with Shrinkage Techniques. 
+
+- Conditional Model
+
+The Conditional Model was a unique model that attempted to address the heavily zero-inflated data. This model first performed a classification to predict if a policy holder would have a claim at all, and then perform regression on those who were predicted to find the value of that claim. However, this model was unsuccessful for our purposes due to a failed classification.
+
+From these four variations and their sub-types, OLS regression still performed the best in both methods. This was reasoned to be due to the severe underfitting of the models to the data, as seen by low Adjusted R-Squared values, and lower Test MSE than Training MSE. 
+
+\newpage
+
+# Introduction
+
+My team has been provided a data set of auto insurance policy holder characteristics with the objective of finding the most appropriate model for predicting *pure premiums*. However, the data set provided did not include the desired response variable, and instead, provided the *exposure*, *claim count*, and *claim incurred* (*loss*) of each policy holder, which was could be used to calculate the pure premium. Each team member was delegated a type of model to use to predict the *pure premium*, and this report is focused on linear regression models and a variety of variations. The variations of linear models explored were as follows Ordinary Least Squares (OLS) regression, OLS with shrinkage techniques, best subset selection, and a special conditional model. This report is to be coupled with a presentation that compares all the types of models explored by the team. 
+
+Before the models, the team decided how to calculate the pure premium predictions. Given the formula as the following:
+
+
+$$ Pure Premium = \frac{claim.count}{Exposure} \times \frac{Loss}{claim.count} = frequency \times severity $$
+
+
+The team elected to employ a two method approach to the  predict the response variable. 
+
+Method 1: Modelling *frequency* and *severity* using separate models then multiplying the best predictions together to form the *pure premium* prediction. This is known as the "Frequency-Severity" Method and is supported by various academics and insurers due to greater interpretability of predictor variables on each response and flexibility (Shi P., Feng X., Ivantvoa A., 2015). This methodology is achieved by taking parts of the formula above to calculate *frequency* and *severity*, and it should be noted that when *claim.count* = 0, the undefined *severity* was simply converted to 0 as well.
+
+Method 2: Using the formula above and adding in a new response variable to the data set simply known as *premium* and running predictive models.
+
+Both methods explored throughout this report.
+
+# Data Exploration
+
+Before creating a predictive model, a preliminary analysis was performed to discover any hidden details or concerns within the data. The data set comprised of 40,621 data points (policies) and 23 variables (excluding the "Index" column). Furthermore, the data consisted of continuous, categorical, and discrete variables, which needed to be considered when making a model. One of the first concerns with linear models is multicollinearity, which can be explored through Figure 1.
+
+```{r Correlation Plot, echo=FALSE, fig.height = 4, fig.width = 4, fig.align='center', fig.cap="Correlation Matrix"}
+cor_plot <- ggcorr(Temp_Data[ ,-1], label = TRUE,
+       label_size = 1.5,
+       label_alpha = FALSE,
+       layout.exp = 1.5,
+       hjust = 0.5, size = 1.5, label_color = "black", color = "black", low = "maroon",
+       high = "steelblue") +
+  ggplot2::labs(title = "Correlation Plot") + ggplot2::theme(plot.title = element_text(hjust = 0.5))
+cor_plot
+```
+
+The correlation between a variety of variables is quite high and must be examined in further detail. Firstly, *vehicle.age* and *vehicle.value* were found to be highly negatively correlated (-0.7). Also, *yrs.licensed* and *ncd.level* was also quite highly positively correlated (0.6). Furthermore, there are four variable that have high correlation with each other and these are *cubic.cent*, *horse.power*, *weight*, and *length*. 
+
+```{r Highly Correlated, echo=FALSE}
+Correlation4 <- cor(Temp_Data[,15:18]) # Put in Appendix 2.1
+kable(Correlation4, caption="Correlation of 4 Related Predictors") %>% kable_styling(latex_options = "hold_position")
+```
+
+The correlations of *cubic.cent*, *horse.power*, *weight*, and *length* were all highly correlated with all being above 0.64. These correlation values were contextually understandable due to engine size determining much of the horse power and length of cars when engineered. By removing the highly correlated variables and only leaving one from each group, multicollinearity could be reduced for all of the models.
+
+Another concern  was the imbalance of data of the response variables. The histograms for *exposure*, *claim.count* and log(*claim.incurred*) were explored to find any poetential problems.
+
+```{r Plot Distribution, echo=FALSE, fig.height = 4, fig.width = 10, fig.cap = "Histograms of Response Variables"}
+
+cost_hist <- ggplot(Temp_Data, aes(x = claim.incurred)) + 
+  geom_histogram(binwidth = 1)
+
+# Actual code
+# exposure_hist <- ggplot(Temp_Data, aes(x = exposure)) +
+#   geom_histogram(binwidth = 0.1, color = "dark blue", fill  = "light blue") +
+#   ggtitle("Exposure Distribution") + theme(plot.title = element_text(size = 11))
+count_hist <- ggplot(Temp_Data, aes(x = claim.count)) + 
+  geom_histogram(binwidth = 1, color = "dark blue", fill  = "light blue") +
+  ggtitle("Claim Count Distribution") + theme(plot.title = element_text(size = 11))
+logcost_hist <- ggplot(Temp_Data, aes(x = log(claim.incurred + 1))) + 
+  geom_histogram(binwidth = 1, color = "dark blue", fill  = "light blue") +
+  ggtitle("Log(Loss) Distribution") + theme(plot.title = element_text(size = 11))
+
+grid.arrange(count_hist, logcost_hist, ncol=2)
+
+```
+
+Both *claim.count* and *claim.incurred* conveys a large imbalance in data as shown by the skewed histogram. The zero-inflated data would negatively affect the accuracy of the models. The proportion was zero claim values was further analysed in the bar plot below.
+
+As seen by the bar plots, there was a large disproportion between the number of policy holders with a claim and the number without. To be price, 92.21% of the policies had zero claims, and this negatively impacted many of the linear models as linear models work best with a normal distribution of the data.
+
+# Data Preparation
+
+## Data Splitting
+
+A few steps were taken to prepare the data. Firstly, the team added columns for *severity* and *frequency* to using the formula in **Section 2**. To address the issue of NAs - from dividing by "zero"-valued claim count - in *severity*, all NAs were changed to zero as a zero *claim.count* would mean no *severity*. Then, the team had to ensure the training and testing sets used for all of the different models needed to be the same to ensure fair comparisons. A data partition of 70% was agreed upon by all team members. To do this, the team used the "set.seed(2020)" as shown in the code below:
+
+```{r Data Partition Code, results="hide", message=FALSE, warning=FALSE, error=FALSE}
+
+set.seed(2020)
+train_obs <- sample(nrow(A2_Data), floor(0.7*nrow(A2_Data)))
+train_set <- A2_Data[train_obs,]
+test_set <- A2_Data[-train_obs,]
+
+```
+
+## Data Transformation
+
+The categorical variables, which had data type "character", were changed into factors for analysis. Furthermore, separate data sets were created to make these categorical variable binary for use in certain models - for linear models this was Best Subset Selection. The code was as below:
+
+```{r Data Transformation Code, results="hide", message=FALSE, warning=FALSE, error=FALSE, eval=FALSE}
+
+Binary_Data <- A2_Data
+Binary_Data[sapply(A2_Data, is.character)] <- lapply(A2_Data[sapply(A2_Data, is.character)], as.factor)
+Binary_Data <- dummy.data.frame(Binary_Data)
+
+```
+
+# Model Selection
+
+The modelling method studied for the report was linear regression methods and different variations. A variety of variations were used to model *frequency*, *severity*, and *pure premium*, such as shrinkage techniques, and best subset selection. It should be noted that, when modelling, the variables *exposure*, *claim.count*, *claim.incurred*, *frequency*, and *severity* were removed from the train set as they were directly related to the computation to the response variables. The two main performance measures we looked at for our analysis were the Test MSE and the Adjusted R-Squared.
+
+## Ordinary Least Squares Regression
+
+Ordinary Least Squares (OLS) Regression is essentially finding the line of best fit between the predictor variables and the response variable. This line of best fit is described by the following equation:
+
+$$ Y = \beta_0 + \beta_1X_1+\beta_2X_2 + ... + \beta_pX_p + \epsilon$$
+
+OLS Regression is often praised for it's interpretability and low computational cost. It is also the first model performed for any predictive analytics, and there are a large amount of real world applications of this model.
+
+### Simple Linear Regression Model
+
+The first linear model we studied was an  OLS regression with all the "X" variables.
+
+#### Frequency
+
+As shown in the summary in **Appendix 5.1**, the OLS *frequency* linear regression yields an interesting output and performance measures. This can be interpreted from the Adjusted R-squared which is 0.01196, meaning the variables only explain 1.19% of the model. The MSE for the model is 0.5930657, which is usually considered a good thing as the error is so low, however, this is due to the small range of possible *frequency* values being from 0 to 12 and the data is heavily zero inflated. The following variables were all statistically significant (p-value < 0.05) *year*, *business.typeRB*, *marital.statusMarried*, *yrs.licensed*, *body.codeB*, *vehicle.age*, *vehicle.value*, *no.seats*, *width*, and *prior.claims*, which which meant they had a high probability of actually explaining the Response Variable. Of these variables, cars with *body code B* got into less frequent accidents than other cars as shown by the relatively high coefficient (0.11). The residuals were then studied.. 
+
+```{r Linear Regression Frequency, echo=FALSE, include = FALSE}
+
+# Basic Frequency Model
+# Frequency Data
+# Prem is loss over exposure
+# Linear regression
+require(dplyr)
+freq_train <- train_set %>% select(-sev, -prem, -Index, -claim.count, -exposure, -claim.incurred)
+freq_test <- test_set %>% select(-sev, -prem, -Index, -claim.count, -exposure, -claim.incurred)
+freq_ytest <- test_set$freq
+
+# Basic linear regression
+lr_freq_fit <- lm(freq ~. , data = freq_train)
+summary(lr_freq_fit)
+lr_freq_pred <- predict(lr_freq_fit, newdata = freq_test)
+lr_freq_mse <- mean((freq_ytest - lr_freq_pred)^2)
+lr_freq_res <- resid(lr_freq_fit)
+# rmse(freq_ytest, lr_freq_pred)
+# lr_freq_mse
+
+# Range of frequency
+range_freq <- range(A2_Data$freq)
+
+ AIC(lr_freq_fit)
+ BIC(lr_freq_fit)
+
+# Train MSE
+lr_freq_train_pred <- predict(lr_freq_fit, newdata = freq_train)
+lr_freq_train_mse <- mean((train_set$freq - lr_freq_train_pred)^2)
+# lr_freq_train_mse
+
+```
+
+```{r Frequency Residual Plots, fig.height = 3, fig.width = 7, echo=FALSE, fig.cap="*left* - Frequency Residual vs Fitted. *right* - Frequency Q-Q Plot."}
+
+par(mfrow=c(1,2))
+ plot(lr_freq_fit, which = 1, col="darkblue")
+ plot(lr_freq_fit, which = 2, col="darkblue")
+ 
+```
+
+The left plot shows the models overfitting of the zero values, depicted by the red line going through the zero values. Above this red line is all the values that it failed to predict correctly (aka all nonzero values). The right plot is the Q-Q plot, which shows that the data is heacily skewed, as indicated by the sudden inflexion. This is reaffirming our data is not normally distributed.
+
+#### Severity
+
+Looking at the summary of OLS for *severity* in **Appendix 5.2**, the model performs poorly on all metrics. There are 11 significant variables to the model but, the Adjusted R Squared and Test MSE demonstrate that this is a poor mode as they are 0.01043 and 127,126 respectively. Similar to the *frequency* model above, the model fits the zero values correctly, but anything above zero failed to be correctly predicted. This is further emphasised when taking the the model of *log(severity + 1)* and looking at the figure below.
+
+```{r Linear Regression Severity, echo=FALSE, include=FALSE, fig.width=8, fig.length=12, fig.cap="Severity Residual Plots"}
+# Basic Severity Model
+# Severity Data
+# Prem is loss over exposure
+# Linear regression
+sev_train <- train_set %>% select(-freq, -prem, -Index, -claim.count, -exposure, -claim.incurred)
+sev_test <- test_set %>% select(-freq, -prem, -Index, -claim.count, -exposure, -claim.incurred)
+sev_ytest <- test_set$sev
+
+# Basic linear regression
+lr_sev_fit <- lm(sev ~. , data = sev_train)
+summary(lr_sev_fit)
+lr_sev_pred <- predict(lr_sev_fit, newdata = sev_test)
+lr_sev_mse <- mean((sev_ytest - lr_sev_pred)^2)
+lr_sev_res <- resid(lr_sev_fit)
+rmse(sev_ytest, lr_sev_pred)
+lr_sev_mse
+AIC(lr_sev_fit)
+BIC(lr_sev_fit)
+
+# Train MSE
+lr_sev_train_pred <- predict(lr_sev_fit, newdata = sev_train)
+lr_sev_train_mse <- mean((train_set$sev - lr_sev_train_pred)^2)
+lr_sev_train_mse
+
+```
+
+```{r Linear Regression log(Severity), include=FALSE, fig.width=8, fig.length=12, fig.cap="log(Severity) Residual Plots", echo=FALSE}
+# Basic Severity Model
+# Severity Data
+# Prem is loss over exposure
+# Linear regression
+sev_train <- train_set %>% select(-freq, -prem, -Index, -claim.count, -exposure, -claim.incurred)
+sev_test <- test_set %>% select(-freq, -prem, -Index, -claim.count, -exposure, -claim.incurred)
+sev_ytest <- test_set$sev
+
+# Basic linear regression
+lr_logsev_fit <- lm(log(sev + 1) ~. , data = sev_train)
+# summary(lr_logsev_fit)
+lr_logsev_pred <- predict(lr_logsev_fit, newdata = sev_test)
+lr_logsev_mse <- mean((log(sev_ytest + 1) - lr_logsev_pred)^2)
+lr_logsev_res <- resid(lr_logsev_fit)
+# lr_logsev_plot <- plot(lr_logsev_fit)
+# rmse(log(sev_ytest + 1), lr_sev_pred)
+# lr_logsev_mse
+# AIC(lr_logsev_fit)
+# BIC(lr_logsev_fit)
+
+```
+
+```{r Log(Severity) Residual Plots,fig.height = 3, fig.width = 7, fig.cap = "Residual Plots Log(Severity)", echo=FALSE}
+
+par(mfrow=c(1,2))
+ plot(lr_logsev_fit, which = 1, col="darkblue")
+ plot(lr_logsev_fit, which = 2, col="darkblue")
+
+ 
+```
+We can see that there was an even clearer showcase of the skewed data. Regardless, taking the predicted values of *frequency* and *severity* and combining them for Method 1, it was found that the Test MSE was 896,096.
+
+#### Premium
+
+We then inspected Method 2, where we simply ran the OLS regression on the *premium* response variable. The coefficients were than compared to those of *severity* and *frequency*: 
+
+```{r Linear Regression Premium, echo=FALSE, results='hide', include=FALSE}
+# Basic Pure Premium Model
+# Premium Data
+# Linear regression
+prem_train <- train_set %>% select(-freq, -sev, -Index, -claim.count, -exposure, -claim.incurred)
+prem_test <- test_set %>% select(-freq, -sev, -Index, -claim.count, -exposure, -claim.incurred)
+prem_ytest <- test_set$prem
+prem_ytrain <- train_set$prem
+
+# Basic linear regression
+lr_prem_fit <- lm(prem ~. , data = prem_train)
+summary(lr_prem_fit)
+lr_prem_pred <- predict(lr_prem_fit, newdata = prem_test)
+lr_prem_mse <- mean((prem_ytest - lr_prem_pred)^2)
+lr_prem_res <- resid(lr_prem_fit)
+lr_prem_plot <- plot(lr_prem_fit)
+rmse(prem_ytest, lr_prem_pred)
+lr_prem_mse
+AIC(lr_prem_fit)
+BIC(lr_prem_fit)
+
+# Train MSE
+lr_prem_train_pred <- predict(lr_prem_fit, newdata = prem_train)
+lr_prem_train_mse <- mean((train_set$prem - lr_prem_train_pred)^2)
+lr_prem_train_mse
+
+# Compare MSE of Severity*Frequency and just Pure Premium
+lr_comb_pred <- lr_sev_pred*lr_freq_pred
+lr_comb_mse <- mean((prem_ytest - lr_comb_pred)^2)
+lr_comb_mse
+lr_prem_mse 
+
+# Train MSE
+lr_comb_train_pred <- lr_sev_train_pred*lr_freq_train_pred
+lr_comb_train_mse <- mean((prem_ytrain - lr_comb_train_pred)^2)
+lr_comb_train_mse
+
+```
+
+The Test MSE for Premium was 880,376, and the Adjusted R-Squared was less than 1%. In addition, there were only 6 variables of statistical significance in this model. There was a marginal difference in the Test MSE of the Method 1 and Method 2, but Method 2 was the lower Test MSE. However, one major concern found from the models was the correlated variables discussed in prior sections. These variables will lead to over weighting of the predictors, which will cause over fitting and inaccuracy.
+
+### Null Model
+
+Considering the poor results from the basic linear regression models, the null model was used to test the potential of linear models for this data set. The null model is derived from the null hypothesis. This was considered one of the benchmarks for the linear regressions methods as it represented randomness of the relationship between predictors and response.
+
+
+```{r Null Bench, echo = FALSE}
+
+Response <- c("Frequency", "Severity", "Method1", "Method2")
+MSE <- c(0.6, 128273, 899018, 887136)
+
+null_bench <- data.frame(Response,MSE)
+kable(null_bench, caption = "Null Model Test MSE Benchmarks") %>% kable_styling(latex_options = "hold_position")
+
+```
+
+If the models had higher Test MSEs than the Null Model, then the model would be deemed as no better than random.
+
+### Multicollinearity Removed
+
+In **Section 2**, it was noted that there were highly correlated variables that would need to be addressed due to multicollinearity being an issue for linear models. The variables *vehicle.age*, *ncd.level*,  *horse.power*, *weight*, and *length* were removed from the data set with the intention of improving the linear model. 
+
+```{r No Correlation Model, echo=FALSE, result='hide', fig.show='hide', include=FALSE, eval=FALSE}
+# Remove Multicollinearity
+# cubic.cent, horse.power, weight, and length are all positively correlated
+# vehicle value and vehicle age are negatively correlated
+lr_freq_nocor_fit <- lm(freq ~. -Index - sev - prem - claim.count - exposure - claim.incurred - vehicle.age - cubic.cent - horse.power - length - ncd.level, data = train_set)
+summary(lr_freq_nocor_fit)
+lr_freq_nocor_pred <- predict(lr_freq_nocor_fit, newdata = test_set)
+lr_freq_nocor_mse <- mean((test_set$freq - lr_freq_nocor_pred)^2)
+lr_freq_nocor_mse
+AIC(lr_freq_nocor_fit)
+BIC(lr_freq_nocor_fit)
+
+lr_freq_nocor_train_pred <- predict(lr_freq_nocor_fit, newdata = train_set)
+lr_freq_nocor_train_mse <- mean((train_set$freq - lr_freq_nocor_train_pred)^2)
+lr_freq_nocor_train_mse
+
+# cubic.cent, horse.power, weight, and length are all positively correlated
+# vehicle value and vehicle age are negatively correlated
+lr_sev_nocor_fit <- lm(sev ~. -Index -freq -prem -claim.count -exposure -claim.incurred -vehicle.age -cubic.cent -horse.power -length -ncd.level, data = train_set)
+summary(lr_sev_nocor_fit)
+lr_sev_nocor_pred <- predict(lr_sev_nocor_fit, newdata = test_set)
+lr_sev_nocor_mse <- mean((test_set$sev - lr_sev_nocor_pred)^2)
+lr_sev_nocor_mse
+AIC(lr_sev_nocor_fit)
+BIC(lr_sev_nocor_fit)
+
+lr_sev_nocor_train_pred <- predict(lr_sev_nocor_fit, newdata = train_set)
+lr_sev_nocor_train_mse <- mean((train_set$sev - lr_sev_nocor_train_pred)^2)
+lr_sev_nocor_train_mse
+mse(train_set$sev, lr_sev_nocor_train_pred)
+mse(test_set$sev, lr_sev_nocor_pred)
+
+
+# PREMIUM
+# cubic.cent, horse.power, weight, and length are all positively correlated
+# vehicle value and vehicle age are negatively correlated
+lr_prem_nocor_fit <- lm(prem ~. -Index -freq -sev -claim.count -exposure -claim.incurred -vehicle.age -cubic.cent -horse.power -length -ncd.level, data = train_set)
+summary(lr_prem_nocor_fit)
+lr_prem_nocor_pred <- predict(lr_prem_nocor_fit, newdata = test_set)
+lr_prem_nocor_mse <- mean((test_set$prem - lr_prem_nocor_pred)^2)
+lr_prem_nocor_mse
+AIC(lr_prem_nocor_fit)
+BIC(lr_prem_nocor_fit)
+
+lr_prem_nocor_train_pred <- predict(lr_prem_nocor_fit, newdata = train_set)
+lr_prem_nocor_train_mse <- mean((train_set$prem - lr_prem_nocor_train_pred)^2)
+lr_prem_nocor_train_mse
+
+# COMBINATION
+lr_comb_nocor_pred <- lr_freq_nocor_pred*lr_sev_nocor_pred
+lr_comb_nocor_mse <- mean((lr_comb_nocor_pred - test_set$prem)^2)
+
+as.matrix(coef(lr_prem_nocor_fit))
+```
+
+The correlated variables were removed, the *frequency* test MSE (0.593342) was higher than the previous model's, but the *severity* test MSE was lower. However, most importantly, when looking at the individual *premium*, the model had an improved test MSE of 880,331, which is a difference of 45. Regardless of these improvements, the R-Squared for these models were still lower than 0.01, conveying unreliability for predicting *premiums*. In addition, the train MSE (972,114) was still higher than the test MSE, indicating there is underfitting for the model. Given the *premium* result and the underlying concerns multicollinearity can have for many linear models and that my team came to the conclusion that they could be detrimental to the overall model, the correlated variables were removed by re-adjusting the train set and test set (with the following code). Though the shrinkage methods can deal with multicollinearity, the performance measures indicated that they performed better without the correlated variables at all.
+
+```{r Remove correlation from train and test, echo=TRUE, result = 'hide'}
+train_set <- train_set %>% select(-vehicle.age, -cubic.cent, -horse.power, -length, -ncd.level)
+test_set <- test_set %>% select(-vehicle.age, -cubic.cent, -horse.power, -length, -ncd.level)
+```
+
+## Shrinkage Techniques: LASSO, Ridge, and Elastic Net
+
+Shrinkage techniques are used to reduce overfitting of the model to the training data by penalizing the coefficients with by introducing a tuning parameters/hyperparameters (lambda) to manipulate the values of the coefficients. There are three types of shrinkage techniques commonly used and they are LASSO, Ridge, and Elastic Net, which all have different capabilities. To find the optimal tuning parameter, the training data was partitioned into "10-Folds" and cross-validation (CV) was used to find the lambda with the lowest CV error. One of the major advantages of shrinkage techniques is their ability to address multicollinearity by effectively reducing coefficient size. However, for the purposes of more reliable modelling and comparison amongst team members (as discussed in the previous section), correlated predictor variables were removed prior to this.
+
+### LASSO
+
+The first shrinkage method investigated was LASSO Regression. This method is know for its innate ability to perform feature selection by reducing variables to zero value coefficients - known as absolute shrinkage. The LASSO formula is as follows:
+
+$$ minimize\{SSE + \lambda\sum_{ j=1 }^{ p } |\beta_{j}|\}$$
+
+
+
+LASSO models were fitted for all three response variables and the these were the training MSE and testing MSE values:
+
+
+```{r LASSO MSE Comparisons, echo=FALSE}
+Type <- c("Frequency", "Severity", "Combination", "Premium")
+Train_MSE <- c("0.5475002", "138989", "980125","972544")
+Test_MSE <- c("0.5936", "127044", "899004", "880552")
+ridge_table <- data.frame(Type, Train_MSE, Test_MSE)
+kable(ridge_table, caption = "LASSO MSE Comparisons\n") %>% kable_styling(latex_options = "hold_position")
+```
+
+In all cases, the test MSE was lower than the train MSE, depicting underfitting of the model, a common trend in all the shrinkage techniques. In addition, *frequency* and *premium* both had higher test MSE than the OLS with correlated variables removed, however, the *severity* LASSO model resulted in a lower test MSE than all prior and future models.
+
+The following plots depict the feature selection of LASSO performed:
+
+```{r LASSO, echo=FALSE, result='hide', fig.show='hide', include=FALSE}
+# LASSO Severity
+ls_xtrain <- train_set %>% select(-freq, -sev, -prem, -Index, -claim.count, -exposure, -claim.incurred) %>% data.matrix()
+ls_ytrain <- train_set %>% select(sev) %>%  data.matrix()
+ls_xtest <- test_set %>% select(-freq, -sev, -prem, -Index, -claim.count, -exposure, -claim.incurred) %>%  data.matrix()
+ls_ytest <- test_set %>% select(sev) %>%  data.matrix()
+# Running the model
+ls_fit <- glmnet(ls_xtrain, ls_ytrain, alpha = 1)
+cv_ls_fit <- cv.glmnet(ls_xtrain, ls_ytrain, alpha = 1, nfolds = 10)
+ls_pred <- predict(cv_ls_fit, s=cv_ls_fit$lambda.min, newx=ls_xtest)
+# Model Measurements
+ls_mse <- mean((ls_ytest - ls_pred)^2)
+ls_lambda <- cv_ls_fit$lambda.min
+# Final model
+fin_ls_fit <- glmnet(ls_xtrain, ls_ytrain, alpha = 1, lambda = ls_lambda)
+fin_ls_pred <- predict(fin_ls_fit, s=ls_lambda, newx=ls_xtest)
+fin_ls_mse <- mean((ls_ytest - fin_ls_pred)^2)
+fin_ls_train_pred <- predict(fin_ls_fit, s=ls_lambda, newx=ls_xtrain)
+fin_ls_train_mse <- mean((as.numeric(ls_ytrain) - as.numeric(fin_ls_train_pred))^2)
+mean(cv_ls_fit$glmnet.fit$dev.ratio)
+# LASSO Frequency
+lf_xtrain <- train_set %>% select(-freq, -sev, -prem, -Index, -claim.count, -exposure, -claim.incurred) %>% data.matrix()
+lf_ytrain <- train_set %>% select(freq) %>%  data.matrix()
+lf_xtest <- test_set %>% select(-freq, -sev, -prem, -Index, -claim.count, -exposure, -claim.incurred) %>%  data.matrix()
+lf_ytest <- test_set %>% select(freq) %>%  data.matrix()
+# Running the model
+lf_fit <- glmnet(lf_xtrain, lf_ytrain, alpha = 1)
+cv_lf_fit <- cv.glmnet(lf_xtrain, lf_ytrain, alpha = 1, nfolds = 10)
+lf_pred <- predict(cv_lf_fit, s=cv_lf_fit$lambda.1se, newx=lf_xtest)
+# Model Measurements
+lf_mse <- mean((lf_ytest - lf_pred)^2)
+lf_lambda <- cv_lf_fit$lambda.min
+# Final model
+fin_lf_fit <- glmnet(lf_xtrain, lf_ytrain, alpha = 1, lambda = lf_lambda)
+fin_lf_pred <- predict(fin_lf_fit, s=lf_lambda, newx=lf_xtest)
+fin_lf_mse <- mean((lf_ytest - fin_lf_pred)^2)
+
+fin_lf_train_pred <- predict(fin_lf_fit, s=lf_lambda, newx=lf_xtrain)
+fin_lf_train_mse <- mean((as.numeric(lf_ytrain) - as.numeric(fin_lf_train_pred))^2)
+
+# LASSO Combination
+fin_lcomb_train_pred <- fin_ls_train_pred*fin_lf_train_pred
+fin_lcomb_train_mse <- mean((fin_lcomb_train_pred - train_set$prem)^2)
+
+fin_lcomb_pred <- fin_lf_pred*fin_ls_pred
+fin_lcomb_mse <- mean((fin_lcomb_pred - test_set$prem)^2)
+
+# LASSO Premium
+lp_xtrain <- train_set %>% select(-freq, -sev, -prem, -Index, -claim.count, -exposure, -claim.incurred) %>% data.matrix()
+lp_ytrain <- train_set %>% select(prem) %>%  data.matrix()
+lp_xtest <- test_set %>% select(-freq, -sev, -prem, -Index, -claim.count, -exposure, -claim.incurred) %>%  data.matrix()
+lp_ytest <- test_set %>% select(prem) %>%  data.matrix()
+# Running the model
+lp_fit <- glmnet(lp_xtrain, lp_ytrain, alpha = 1)
+cv_lp_fit <- cv.glmnet(lp_xtrain, lp_ytrain, alpha = 1, nfolds = 10)
+lp_lambda <- cv_lp_fit$lambda.min
+# Final model
+fin_lp_fit <- glmnet(lp_xtrain, lp_ytrain, alpha = 1, lambda = lp_lambda)
+lp_pred <- predict(fin_lp_fit, s=cv_lp_fit$lambda.1se, newx=lp_xtest)
+# Model Measurements
+fin_lp_mse <- mean((lp_ytest - lp_pred)^2)# LASSO Severity
+# Training MSE
+fin_lp_train_pred <- predict(fin_lp_fit, s=lp_lambda, newx=lp_xtrain)
+fin_lp_train_mse <- mean((as.numeric(lp_ytrain) - as.numeric(fin_lp_train_pred))^2)
+
+
+# lf_lambda
+# ls_lambda
+# lp_lambda
+# 
+# as.matrix(coef(cv_lf_fit, cv_lf_fit$lambda.min))
+# as.matrix(coef(cv_ls_fit, cv_ls_fit$lambda.min))
+# as.matrix(coef(cv_lp_fit, cv_lp_fit$lambda.min))
+
+```
+
+```{r LASSO Plots, echo=FALSE, fig.width=10, fig.length=8, fig.cap = "The plots show the relationships between tuning parameter (*lambda*) and the predictor coefficients. As LASSO performs natural feature selection, the variables are reduced to zero as the *lambda* become larger. The red line marks the optimal *lambda* value."}
+par(mfrow=c(1,3), mar = c(6, 4, 6, 2) + 0.1)
+plot_glmnet(lf_fit, main="Frequency (Alpha = 1)\n\n")
+abline(v = log(lf_lambda), col = "red", lty = "dashed")
+plot_glmnet(ls_fit,  main = "Severity (Alpha = 1)\n\n")
+abline(v = log(ls_lambda), col = "red", lty = "dashed")
+plot_glmnet(lp_fit,  main = "Premium (Alpha = 1)\n\n")
+abline(v = log(lp_lambda), col = "red", lty = "dashed")
+
+
+```
+
+The plots above in Figure above demonstrate the behavior of the coefficients as the lambda value is increased. The red line marks where the lambda with the lowest cross validation occured - from left to right the minimum lambda values were 0.00257, 0.54218, and 4.93790. The *frequency* model removed 2 variables *region* and *fuel.type*, and *severity* removed 1 variable *region*; indicating they were not relevant for the predicting the response variable. However, LASSO Regression with response variable *premium* removed a total of 6 variables, *driver.age*, *region*, *body.code*, *vehicle.value*, *weight*, and *fuel.type*. These 6 variables were not correlated, however, they increased the CV error, indicating they were reducing the model accuracy if left in the model. One disadvantage of LASSO regression is that there are no *p*-values to study, meaning we cannot determine the statistical significance of these variables.
+
+### Ridge Regression
+
+Similar to LASSO, Ridge regression penalizes the coefficients by adding a tuning parameter, however, cannot reduce the coefficient of a variable to zero, and hence does not possess inherent feature selection. As lambda is pushed to infinity, the coefficients are also pushed towards zero, but will never be zero. In the same fashion as LASSO, the optimal lambda value is found by finding the lambda with the lowest CV error.
+
+$$minimize\{SSE + \lambda\sum_{ j=1 }^{ p } \beta_{j}^2\}$$
+
+Ridge models were fitted for all three response variables and the these were the training MSE and testing MSE values:
+
+```{r Ridge MSE Comparisons, echo=FALSE}
+Type <- c("Frequency", "Severity", "Combination", "Premium")
+Train_MSE <- c("0.5475", "138990", "991355","991355")
+Test_MSE <- c("0.5937", "128341", "898994", "880481")
+ridge_table <- data.frame(Type, Train_MSE, Test_MSE)
+kable(ridge_table, caption = "Ridge MSE Comparisons\n") %>% kable_styling(latex_options = "hold_position")
+```
+
+In all cases, the test MSE was lower than the train MSE, demonstrating underfitting of the model. Furthermore, ridge regression underperformed compared to Ordinary Least Squares Regression, accentuating the underfitting of the model.
+
+The following plots depict the coefficients of Ridge performed:
+
+```{r Ridge, echo=FALSE, result='hide', fig.show='hide', include=FALSE}
+# Ridge Severity
+rs_xtrain <- train_set %>% select(-freq, -sev, -prem, -Index, -claim.count, -exposure, -claim.incurred) %>% data.matrix()
+rs_ytrain <- train_set %>% select(sev) %>%  data.matrix()
+rs_xtest <- test_set %>% select(-freq, -sev, -prem, -Index, -claim.count, -exposure, -claim.incurred) %>%  data.matrix()
+rs_ytest <- test_set %>% select(sev) %>%  data.matrix()
+
+# Running the model
+rs_fit <- glmnet(rs_xtrain, rs_ytrain, alpha = 0)
+cv_rs_fit <- cv.glmnet(rs_xtrain, rs_ytrain, alpha = 0, nfolds = 10)
+rs_pred <- predict(cv_rs_fit, s=cv_rs_fit$lambda.min, newx=rs_xtest)
+# Model Measurements
+rs_mse <- mean((rs_ytest - rs_pred)^2)
+plot(rs_fit)
+rs_lambda <- cv_rs_fit$lambda.min
+# Final model
+fin_rs_fit <- glmnet(rs_xtrain, rs_ytrain, alpha = 0, lambda = rs_lambda)
+fin_rs_pred <- predict(fin_rs_fit, s=rs_lambda, newx=rs_xtest)
+
+fin_rs_pred <- t(fin_rs_pred)[,1] # Not too sure why I need to transpose and take one col this to get a the predicted values
+fin_rs_mse <- mean((rs_ytest - fin_rs_pred)^2)
+plot(fin_rs_fit)
+
+fin_rs_train_pred <- predict(fin_rs_fit, s=rs_lambda, newx=rs_xtrain)
+fin_rs_train_mse <- mean((as.numeric(rs_ytrain) - as.numeric(fin_rs_train_pred))^2)
+
+# Ridge Frequency
+rf_xtrain <- train_set %>% select(-freq, -sev, -prem, -Index, -claim.count, -exposure, -claim.incurred) %>% data.matrix()
+rf_ytrain <- train_set %>% select(freq) %>%  data.matrix()
+rf_xtest <- test_set %>% select(-freq, -sev, -prem, -Index, -claim.count, -exposure, -claim.incurred) %>%  data.matrix()
+rf_ytest <- test_set %>% select(freq) %>%  data.matrix()
+# Running the model
+rf_fit <- glmnet(rf_xtrain, rf_ytrain, alpha = 0)
+cv_rf_fit <- cv.glmnet(rf_xtrain, rf_ytrain, alpha = 0, nfolds = 10)
+rf_pred <- predict(cv_rf_fit, s=cv_rf_fit$lambda.1se, newx=rf_xtest)
+# Model Measurements
+rf_mse <- mean((rf_ytest - rf_pred)^2)
+rf_lambda <- cv_rf_fit$lambda.min
+# Final model
+fin_rf_fit <- glmnet(rf_xtrain, rf_ytrain, alpha = 0, lambda = rf_lambda)
+fin_rf_pred <- predict(fin_rf_fit, s=rf_lambda, newx=rf_xtest)
+fin_rf_mse <- mean((rf_ytest - fin_rf_pred)^2)
+
+fin_rf_train_pred <- predict(fin_rf_fit, s=rf_lambda, newx=rf_xtrain)
+fin_rf_train_mse <- mean((as.numeric(rf_ytrain) - as.numeric(fin_rf_train_pred))^2)
+
+# Ridge Combination
+fin_encomb_train_pred <- fin_rs_train_pred*fin_rf_train_pred
+fin_encomb_train_mse <- mean((fin_encomb_train_pred - train_set$prem)^2)
+
+fin_encomb_pred <- fin_rf_pred*fin_rs_pred
+fin_encomb_mse <- mean((fin_encomb_pred - test_set$prem)^2)
+
+# Ridge Premium
+rp_xtrain <- train_set %>% select(-freq, -sev, -prem, -Index, -claim.count, -exposure, -claim.incurred) %>% data.matrix()
+rp_ytrain <- train_set %>% select(prem) %>%  data.matrix()
+rp_xtest <- test_set %>% select(-freq, -sev, -prem, -Index, -claim.count, -exposure, -claim.incurred) %>%  data.matrix()
+rp_ytest <- test_set %>% select(prem) %>%  data.matrix()
+# Running the model
+rp_fit <- glmnet(rp_xtrain, rp_ytrain, alpha = 0)
+cv_rp_fit <- cv.glmnet(rp_xtrain, rp_ytrain, alpha = 0, nfolds = 10)
+rp_lambda <- cv_rp_fit$lambda.min
+# Final model
+fin_rp_fit <- glmnet(rp_xtrain, rp_ytrain, alpha = 0, lambda = rp_lambda)
+rp_pred <- predict(fin_rp_fit, s=cv_rp_fit$lambda.1se, newx=rp_xtest)
+# Model Measurements
+fin_rp_mse <- mean((rp_ytest - rp_pred)^2)# LASSO Severity
+# Training MSE
+fin_rp_train_pred <- predict(fin_rp_fit, s=rp_lambda, newx=rp_xtrain)
+fin_rp_train_mse <- mean((as.numeric(rp_ytrain) - as.numeric(fin_rp_train_pred))^2)
+
+```
+
+```{r Ridge Plots, echo=FALSE, fig.width=10, fig.length=8, fig.cap="The plots show the relationship between the tuning parameter (*lambda*) and the predictor coefficients."}
+
+par(mfrow=c(1,3), mar = c(6, 4, 6, 2) + 0.1)
+plot_glmnet(rf_fit, main="Frequency (Alpha = 0)\n\n")
+abline(v = log(rf_lambda), col = "red", lty = "dashed")
+plot_glmnet(rs_fit,  main = "Severity (Alpha = 0)\n\n")
+abline(v = log(rs_lambda), col = "red", lty = "dashed")
+plot_glmnet(rp_fit,  main = "Premium (Alpha = 0)\n\n")
+abline(v = log(rp_lambda), col = "red", lty = "dashed")
+# log(rf_lambda)
+# log(rs_lambda)
+# log(rp_lambda)
+# 
+# as.matrix(coef(cv_rf_fit, cv_rf_fit$lambda.min))
+# as.matrix(coef(cv_rs_fit, cv_rs_fit$lambda.min))
+# as.matrix(coef(cv_rp_fit, cv_rp_fit$lambda.min))
+
+```
+
+Unlike LASSO regression, ridge regression does not perform feature selection as it cannot shrink coefficients to 0. From Figure 4.4 we can see it can shrink coefficients extremely close to zero. However, we can see that the lambda value where CV error is lowest is actually where coefficients are larger than OLS regression for both *severity* and *premium*, which essentially means the hyperparameter is effectively NOT regularizing the variables.  Studying the coefficients, we can see *width* was considered the variable with the biggest impact as it had the largest coefficient, and *no. of seats* seemed to have very little importance. However, one major disadvantage of shrinkage techniques is that there is no academically established measure of significance (like *p*-value for OLS) of the predictors. 
+
+### Elastic Net Regression
+
+The Elastic Net shrinkage technique is a combination of LASSO and Ridge regression as depicted by the formula:
+
+$$minimize\{SSE + \lambda_1\sum_{ j=1 }^{ p } \beta_{j}^2\ + \lambda_2\sum_{j=1}^{p}|\beta_{j}|\}$$
+
+Elastic Net can still perform feature selection like LASSO. Furthermore, one of the benefits of this is when there are two highly correlated variables, one of the variables could be reduce to zero whilst the other will still be kept, but with a coefficient close to zero.
+
+The results of Elastic Net were as follows:
+```{r Elastic Net MSE Comparisons, echo=FALSE}
+Type <- c("Frequency", "Severity", "Combination", "Premium")
+Train_MSE <- c("0.5936", "138996", "991376","972523")
+Test_MSE <- c("0.5475", "127065", "896631", "880710")
+en_table <- data.frame(Type, Train_MSE, Test_MSE)
+kable(en_table, caption = "Elastic Net MSE Comparisons\n") %>% kable_styling(latex_options = "hold_position")
+```
+
+Another aspect to Elastic Net is the "alpha" term, which essentially dictates whether the model will act more like LASSO regression (alpha = 1) or Ridge regression (alpha = 0). For the purposes of this study a balance combination was used with alpha = 0.5. The plot below conveys the effects of the shrinkage technique:
+
+```{r Elastic Net, echo=FALSE, include=FALSE}
+# Elastic Net Severity
+ens_xtrain <- train_set %>% select(-freq, -sev, -prem, -Index, -claim.count, -exposure, -claim.incurred) %>% data.matrix()
+ens_ytrain <- train_set %>% select(sev) %>%  data.matrix()
+ens_xtest <- test_set %>% select(-freq, -sev, -prem, -Index, -claim.count, -exposure, -claim.incurred) %>%  data.matrix()
+ens_ytest <- test_set %>% select(sev) %>%  data.matrix()
+# Running the model
+ens_fit <- glmnet(ens_xtrain, ens_ytrain, alpha = 0.5)
+cv_ens_fit <- cv.glmnet(ens_xtrain, ens_ytrain, alpha = 0.5, nfolds = 10)
+ens_pred <- predict(cv_ens_fit, s=cv_ens_fit$lambda.1se, newx=ens_xtest)
+# Model Measurements
+ens_mse <- mean((ens_ytest - ens_pred)^2)
+ens_lambda <- cv_ens_fit$lambda.min
+# Final model
+fin_ens_fit <- glmnet(ens_xtrain, ens_ytrain, alpha = 0.5, lambda = ens_lambda)
+fin_ens_pred <- predict(fin_ens_fit, s=ens_lambda, newx=ens_xtest)
+fin_ens_mse <- mean((ens_ytest - fin_ens_pred)^2)
+
+fin_ens_train_pred <- predict(fin_ens_fit, s=ens_lambda, newx=ens_xtrain)
+fin_ens_train_mse <- mean((as.numeric(ens_ytrain) - as.numeric(fin_ens_train_pred))^2)
+
+# Elastic Net Frequency
+enf_xtrain <- train_set %>% select(-freq, -sev, -prem, -Index, -claim.count, -exposure, -claim.incurred) %>% data.matrix()
+enf_ytrain <- train_set %>% select(freq) %>%  data.matrix()
+enf_xtest <- test_set %>% select(-freq, -sev, -prem, -Index, -claim.count, -exposure, -claim.incurred) %>%  data.matrix()
+enf_ytest <- test_set %>% select(freq) %>%  data.matrix()
+# Running the model
+enf_fit <- glmnet(enf_xtrain, enf_ytrain, alpha = 0.5)
+cv_enf_fit <- cv.glmnet(enf_xtrain, enf_ytrain, alpha = 0.5, nfolds = 10)
+enf_pred <- predict(cv_enf_fit, s=cv_enf_fit$lambda.1se, newx=enf_xtest)
+# Model Measurements
+enf_mse <- mean((log(enf_ytest + 1) - enf_pred)^2)
+enf_lambda <- cv_enf_fit$lambda.min
+# Final model
+fin_enf_fit <- glmnet(enf_xtrain, enf_ytrain, alpha = 0.5, lambda = enf_lambda)
+fin_enf_pred <- predict(fin_enf_fit, s=enf_lambda, newx=enf_xtest)
+fin_enf_mse <- mean((enf_ytest - fin_enf_pred)^2)
+
+fin_enf_train_pred <- predict(fin_enf_fit, s=enf_lambda, newx=enf_xtrain)
+fin_enf_train_mse <- mean((as.numeric(enf_ytrain) - as.numeric(fin_enf_train_pred))^2)
+
+# Elastic Net Combination
+fin_encomb_train_pred <- fin_ens_train_pred*fin_enf_train_pred
+fin_encomb_train_mse <- mean((fin_encomb_train_pred - train_set$prem)^2)
+
+fin_encomb_pred <- fin_enf_pred*fin_ens_pred
+fin_encomb_mse <- mean((fin_encomb_pred - test_set$prem)^2)
+
+# Elastic Net Premium
+enp_xtrain <- train_set %>% select(-freq, -sev, -prem, -Index, -claim.count, -exposure, -claim.incurred) %>% data.matrix()
+enp_ytrain <- train_set %>% select(prem) %>%  data.matrix()
+enp_xtest <- test_set %>% select(-freq, -sev, -prem, -Index, -claim.count, -exposure, -claim.incurred) %>%  data.matrix()
+enp_ytest <- test_set %>% select(prem) %>%  data.matrix()
+# Running the model
+enp_fit <- glmnet(enp_xtrain, enp_ytrain, alpha = 0.5)
+cv_enp_fit <- cv.glmnet(enp_xtrain, enp_ytrain, alpha = 0.5, nfolds = 10)
+enp_lambda <- cv_enp_fit$lambda.min
+# Final model
+fin_enp_fit <- glmnet(enp_xtrain, enp_ytrain, alpha = 0.5, lambda = enp_lambda)
+enp_pred <- predict(fin_enp_fit, s=cv_enp_fit$lambda.1se, newx=enp_xtest)
+# Model Measurements
+fin_enp_mse <- mean((enp_ytest - enp_pred)^2)# LASSO Severity
+# Training MSE
+fin_enp_train_pred <- predict(fin_enp_fit, s=enp_lambda, newx=enp_xtrain)
+fin_enp_train_mse <- mean((as.numeric(enp_ytrain) - as.numeric(fin_enp_train_pred))^2)
+```
+```{r Elastic Net Plot, echo=FALSE, fig.width=10, fig.length=6}
+par(mfrow=c(1,3), mar = c(6, 4, 6, 2) + 0.1)
+plot_glmnet(enf_fit, main="Frequency (Alpha = 0.5)\n\n")
+abline(v = log(enf_lambda), col = "red", lty = "dashed")
+plot_glmnet(ens_fit,  main = "Severity (Alpha = 0.5)\n\n")
+abline(v = log(ens_lambda), col = "red", lty = "dashed")
+plot_glmnet(enp_fit,  main = "Premium (Alpha = 0.5)\n\n")
+abline(v = log(enp_lambda), col = "red", lty = "dashed")
+
+# log(enf_lambda)
+# log(ens_lambda)
+# log(enp_lambda)
+# 
+# as.matrix(coef(cv_enf_fit, cv_enf_fit$lambda.min))
+# as.matrix(coef(cv_ens_fit, cv_ens_fit$lambda.min))
+# as.matrix(coef(cv_enp_fit, cv_enp_fit$lambda.min))
+```
+
+The figure above shows that the mix of LASSO and Ridge is working effectively in *frequency* as we see both the values going directly to zero (LASSO) and those approaching zero (Ridge), and the goodness-of-fit is seen through the Elastic Net model yielding the lowest MSE for *frequency* of all shrinkage types as well as OLS. Observing the coefficients, we can see that feature selection has been used to remove *region* from all three response variable models, identifying the variable as ineffective at measuring the response variables. 
+
+### Summary of Shrinkage Techniques
+
+The most successful shrinkage techniques was the LASSO for *severity* and the combination method, Ridge for *premium*, and Elastic Net for *frequency*. The advantages of shrinkage techniques are the ability to shrink, and, in the case of LASSO and Elastic Net, remove variables that negatively impact the accuracy of the model through cross validation. However, this is a slight trade off for interpretability due to the absence of *p*-values. Studies found potential in a new technique, but is still being explored. Furthermore, these shrinkage techniques underperformed compared to OLS without shrinkage techniques, and this could be due to a few reasons. One potential reason is that the OLS model is already severely underfitting the training data, as seen by the Train MSE > Test MSE, and shrinkage techniques are used to prevent overfitting. Another potential reason is the predictors being poor variables for forecasting the response variable. This will be further discussed in the Section 6.
+
+## Best Subset Selection
+
+Best Subset Selection (BSS) is known as the "all possible regression" model as it takes every combination of predictor variables and find the combination that yields the lowest error score. This is notably better than its counterparts Stepwise function that simply removes and and adds functions to a model one at a time based on statistical significance. BSS requires that the categorical variables are all changed to have dummy variables, leading to a total of 35 predictors. This means there are 34,359,738,368 ($2^{35}$) possible combination, which is very computationally intense. Furthermore, the Best Subset selection can be based on a variety of performance measures such as Adjusted R-Squared, Cp, and BIC. For the purposes of this report Cp was used to as the BSS measure.
+
+The BSS model was run and the results were as follows:
+
+```{r BSS, echo=FALSE, include=FALSE}
+
+bin_train_set <- dummy.data.frame(bin_train_set)
+bin_test_set <- dummy.data.frame(bin_test_set)
+
+# Frequency
+## Binary best subset selection
+bin_freq_train_set <- bin_train_set %>% select(-sev, -claim.incurred, -prem, -Index, -claim.count, -exposure)
+bin_freq_test_set <- bin_test_set %>% select(-sev, -claim.incurred, -prem, -Index, -claim.count, -exposure)
+lr_bin_freq_best_fit <- regsubsets(freq ~., data = bin_freq_train_set) # ! Warning
+lr_bin_freq_best_sum <- summary(lr_bin_freq_best_fit)
+bin_freq_coef <- coef(lr_bin_freq_best_fit, 9)
+# Best Binary Prediction
+lr_bin_freq_best_lm <- lm(freq ~ year + driver.age  + marital.statusDivorced + body.codeA  + body.codeB + body.codeE + horse.power + length + fuel.typeLPG, data = bin_freq_train_set)
+lr_bin_freq_best_lm_pred <- predict(lr_bin_freq_best_lm, newdata = bin_freq_test_set)
+
+# Feature selection
+# Severity
+## Binary best subset selection
+bin_sev_train_set <- bin_train_set %>% select(-freq, -claim.incurred, -prem, -Index, -claim.count, -exposure)
+bin_sev_test_set <- bin_test_set %>% select(-freq, -claim.incurred, -prem, -Index, -claim.count, -exposure)
+lr_bin_sev_best_fit <- regsubsets(sev ~., data = bin_sev_train_set) # ! Warning
+lr_bin_sev_best_sum <- summary(lr_bin_sev_best_fit)
+bin_sev_coef <- coef(lr_bin_sev_best_fit, 9)
+# Best Binary Prediction
+lr_bin_sev_best_lm <- lm(sev ~ year + business.typeNB  + marital.statusDivorced + body.codeB + horse.power + weight  +  length  + prior.claims + fuel.typeLPG , data = bin_sev_train_set)
+# Prediction
+lr_bin_sev_best_lm_pred <- predict(lr_bin_sev_best_lm, newdata = bin_sev_test_set)
+
+# Premium Combination
+bss_comb_pred <- lr_bin_freq_best_lm_pred*lr_bin_sev_best_lm_pred
+bss_comb_mse<- mean((test_set$prem - bss_comb_pred)^2)
+
+# Pure Premium
+## Binary best subset selection
+bin_prem_train_set <- bin_train_set %>% select(-sev, -claim.incurred, -freq, -Index, -claim.count, -exposure)
+bin_prem_test_set <- bin_test_set %>% select(-sev, -claim.incurred, -freq, -Index, -claim.count, -exposure)
+lr_bin_prem_best_fit <- regsubsets(prem ~., data = bin_prem_train_set) # ! Warning
+
+lr_bin_prem_best_sum <- summary(lr_bin_prem_best_fit)
+bin_prem_coef <- coef(lr_bin_prem_best_fit, 7)
+# Best Binary Prediction
+lr_bin_prem_best_lm <- lm(prem ~ year + business.typeNB  + marital.statusDivorced + body.codeB  + length  + prior.claims + fuel.typeLPG, data = bin_prem_train_set)
+lr_bin_prem_best_lm_pred <- predict(lr_bin_prem_best_lm, newdata = bin_prem_test_set)
+
+```
+
+
+For *frequency* (**Appendix 5.3.1**), there were nine coefficients that yielded the lowest Cp Error and these were *year*, *driver.age*, *marital.status (Divorced)*, *body.codes (A, B, E)*, *horse.power*, *length*, and *fuel.type (LPG)*. According to this model, cars with *body.code* type "E" would get into the least accidents, and cars with *fuel.type* "LPG" and younger cars (*year*) were more likely to get into a car accident. However, it's important to note that the R-Squared value is 0%, indicating that our predictor variables do not explain our response variable. Furthermore, the Test MSE has been the highest thus far for *frequency* at 0.5974. 
+
+Similarly, *severity* (**Appendix 5.3.2**) had 9 variables it selected and these were *year*, *business.type (NB)*, *marital.status (Divorced)*, *body.codes (B)*, *horse.power*, *weight*, *length*, *prior.claims* and *fuel.type (LPG)*. The largest positive coefficient was policy holders that were "New Business". Contextually, this could make sense as those getting new insurance could be because they are new drivers. Unfortunately, the Adjusted R-Squared value is 1%, and the Test MSE is relatively high compared to other models (127,624), meaning that this is not a good model for severity.
+
+Looking at Method 1: Combining the results of *frequency* and *severity* resulted in a Test MSE of 897,818 for the *premium*, which was one of the higher Test MSE values.
+
+Looking at Method 2 (**Appendix 5.3.3**): Seven variables were identified as the best combination of predictors to forecast premium and they were *year*, *driver.age*, *marital.status (Divorced)*, *body.codes (B)*, *length*, *prior.claims*, and *fuel.type (LPG)*. The resultant Test MSE for this model was 884,562, the highest of all the models thus far. 
+
+In summation, the Best Subset Selection Method did not find us the best model for any of our response variables, and the method underperformed. Common practice in the workplace is that BSS is a worse version of LASSO, but many argue that BSS can still be better due to selecting unbiased coefficient estimates for its selections 
+
+## Conditional Model
+
+Due to the overall poor results of the previous model, research was conducted to find ways to improve the model. As discussed in Section 3 and Section 5.1, the linear models heavily suffered from the zero-inflated values, hence new methods were looked into. One method that was considered was removing all the zero-values from the data, however, this would be removing nearly 85% of the data from our models.
+
+The Conditional Model took the following approach:
+1. Add a new binary variable that assigned value '0' when the response variable was the over inflated value (in this case zero), and '1' if greater than this value (any value greater thean zero)
+2. Run a Logistic Regression to classify the test response variables into 0 or 1 with a reduced threshold to make up for the imbalance
+3. Run a regression on just the values identified as 1 to predict the values
+
+This method was attempted attempted for the project, however, there was no luck due to failed classification.
+
+
+
+```{r Logistic Regression, echo=FALSE, include=FALSE}
+# Data preparation
+logrbin_train_set <- bin_train_set
+logrbin_test_set <- bin_test_set
+
+logrbin_train_set$bin.loss <- ifelse(train_set$sev > 0, 1, 0)
+logrbin_test_set$bin.loss <- ifelse(test_set$sev > 0, 1, 0)
+xlogrbin_train_set <- logrbin_train_set %>% select(-Index, -sev, -freq, -prem, -claim.incurred, -claim.count, -exposure, -bin.loss) %>% data.matrix()
+xlogrbin_test_set <- logrbin_test_set %>% select(-Index, -sev, -freq, -prem, -claim.incurred, -claim.count, -exposure, -bin.loss) %>% data.matrix()
+
+ylogrbin_train_set <- logrbin_train_set$bin.loss %>% data.matrix()
+
+## logrbin_train_set$bin.loss <- as.numeric(logrbin_train_set$bin.loss)
+# Logistic Regression Classification
+logr_LASSO <- cv.glmnet(xlogrbin_train_set, ylogrbin_train_set, alpha = 1, family = "binomial")
+logr_fit <- glmnet(xlogrbin_train_set, ylogrbin_train_set, alpha = 1, family = "binomial", lambda = logr_LASSO$lambda.min)
+summary(logr_fit)
+
+logr_pred <-  predict(logr_fit, s=logr_LASSO$lambda.min, xlogrbin_test_set, type = "response")
+
+pred_class <- ifelse(logr_pred < 0.1, 0, 1)
+mean(pred_class == logrbin_test_set$bin.loss)
+
+table(pred_class, logrbin_test_set$bin.loss)
+
+class_auc <- roc(logrbin_test_set$bin.loss, 
+              pred_class)
+class_auc # 0.58, Totally random model
+
+# SMOTE UpSample
+logrbin_train_set$bin.loss <- as.factor(logrbin_train_set$bin.loss)
+upsamtrain <- SMOTE(bin.loss ~., data = logrbin_train_set, k = 5, )
+table(upsamtrain$bin.loss)
+
+upsamlogr_fit <- glm(bin.loss ~. -Index -sev -freq -prem -claim.incurred -claim.count -exposure, data = upsamtrain, family = "binomial")
+summary(upsamlogr_fit)
+upsamlogr_pred <-  predict(upsamlogr_fit, logrbin_test_set, type = "response")
+
+upsampred_class <- ifelse(upsamlogr_pred < 0.5, 0, 1)
+
+# Testing the Classification
+mean(upsampred_class == logrbin_test_set$bin.loss)
+table(upsampred_class, logrbin_test_set$bin.loss)
+upsamclass_auc <- roc(logrbin_test_set$bin.loss, 
+              upsampred_class)
+upsamclass_auc # Still random
+
+
+```
+```{r ROC Curve, echo=FALSE}
+
+pred <- prediction(pred_class, logrbin_test_set$bin.loss)
+perf <- performance(pred,"tpr","fpr")
+plot(perf,colorize=TRUE, main = "ROC Curve")
+```
+
+
+
+As depicted by the ROC curve and the AUC of 0.58, the logistic regression failed to classify the values correctly. Considering the prior success with the model as well as other academics, the Conditional Model isn't a bad model, but for our purposes it did not succeed.
+
+# Model Assessment
+
+The best model among the linear methods was then deliberated upon based on prior analysis and Test MSE. The table below encapsulates the results.
+
+```{r Model Comparisons, echo=FALSE}
+Model <- c("OLS", "OLS Correlated Variables Removed", "LASSO", "Ridge", "Elastic Net", "Best Subset Selection")
+Frequency <- c(0.5931, 0.05933, 0.5936, 0.5937, 0.5475, 0.5974)
+Severity <- c(127126, 127099, 127044, 128341, 127065, 127624)
+Method1 <- c(896096, 896350, 896548, 898994, 896631, 897818)
+Method2 <- c(880376, 880331, 880552, 880481, 880710, 884562)
+comparison_table <- data.frame(Model, Frequency, Severity, Method1, Method2)
+kable(comparison_table, caption = "Test MSE Comparison\n") %>% kable_styling(latex_options = "hold_position")
+```
+
+The key results were:
+- The best linear regression model for *frequency* was found to be the Ordinary Least Squares Regression with Elastic Net model. 
+- The best linear regression model for *severity* was found to be the Ordinary Least Squares Regression with LASSO.
+- The best linear regression model for Method 1 - combining *frequency* and *severity* models - was Ordinary Least Squares with all variables.
+- The best linear regression model for Method 2 - response *premium* alone - was Ordinary Least Squares with correlated variables removed.
+
+Though Shrinkage Techniques appeared better at modelling *frequency* and *severity* alone, they underperformed when it came to the *premium* response variable. In general practice, Shrinkage Techniques should improve the base model, but what we found here was that the model was severely underfitting the data, and Shrinkage techniques caused even further underfitting. Furthermore, all of the Adjusted R-Squared values were approximately 1%, meaning the predictor variables only explained approximately 1% of the response variable. 
+
+When deciding between Method 1 and 2 for linear methods, Method 2 prevails as it resulted in a lower Test MSE. However, it is not recommended to use OLS regression methods for predicting pure premiums due to the overall poor results - at least for this data set.
+
+# Conclusion
+
+In conclusion, the linear methods did not perform well with our data set, and was not the recommended model to use.In saying this, OLS without any adjustments performed the best out of our models, accentuating it's potential usage over the "improved" versions. Auto insurance has often used GLM as their predictive model as GLMs are better at dealing with skewed data, something OLS regression fails to do.
+
+\newpage
+
+# Appendix
+
+### Appendix 4.1
+
+### Appendix 5.1.4
+
+For *frequency*:
+
+```{r Null Frequency, echo=FALSE}
+# NULL Frequency Model
+null_freq_fit <- lm(freq ~ 1, data = train_set)
+null_freq_pred <- predict(null_freq_fit, test_set)
+null_freq_mse <- mean((test_set$freq - null_freq_pred)^2)
+null_freq_mse
+
+```
+
+For *severity*:
+
+```{r Null Severity, echo=FALSE}
+# NULL Severity Model
+null_sev_fit <- lm(sev ~ 1, data = train_set)
+null_sev_pred <- predict(null_sev_fit, test_set)
+null_sev_mse <- mean((test_set$sev - null_sev_pred)^2)
+null_sev_mse
+```
+
+
+For *premium*
+```{r Null Premium, echo=FALSE}
+
+mean((null_sev_pred*null_freq_pred - test_set$prem)^2)
+
+null_prem_fit <- lm(prem ~ 1, data = train_set)
+null_prem_pred <- predict(null_prem_fit, test_set)
+null_prem_mse <- mean((test_set$prem - null_prem_pred)^2)
+null_prem_mse
+```
+
+Appndix 5.3.1
+
+```{r Bin Frequency, echo=FALSE}
+# APPENDIX
+# MSE
+bin_freq_mse <- mean((bin_freq_test_set$freq - lr_bin_freq_best_lm_pred)^2)
+# bin_freq_mse
+
+# Visuals
+summ(lr_bin_freq_best_lm)
+# plot(lr_bin_freq_best_fit, scale="Cp")
+# plot(lr_bin_freq_best_sum$cp, xlab="Number of Variables", ylab="Cp")
+
+
+```
+
+Appendix 5.3.2
+
+```{r Bin Severity, echo=FALSE}
+# APPENDIX
+# MSE
+bin_sev_mse <- mean((bin_sev_test_set$sev - lr_bin_sev_best_lm_pred)^2)
+# bin_sev_mse
+# # Performance Measures
+# which.min(lr_bin_sev_best_sum$cp)
+# which.min(lr_bin_sev_best_sum$adjr2)
+# which.min(lr_bin_sev_best_sum$bic)
+
+# Visuals
+summ(lr_bin_sev_best_lm)
+# plot(lr_bin_sev_best_fit, scale="Cp")
+# plot(lr_bin_sev_best_sum$cp, xlab="Number of Variables", ylab="Cp")
+
+
+```
+
+Appendix 5.3.3
+
+```{r Bin Premium, echo=FALSE}
+# APPENDIX
+
+# MSE
+bin_prem_mse <- mean((bin_prem_test_set$prem - lr_bin_prem_best_lm_pred)^2)
+# bin_prem_mse
+
+# Visuals
+summ(lr_bin_prem_best_lm)
+
+```
